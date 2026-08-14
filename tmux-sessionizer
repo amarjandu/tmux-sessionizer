@@ -120,16 +120,89 @@ if [[ -n "$split_type" && -z "$session_idx" ]]; then
     exit 1
 fi
 
-sanity_check() {
-    if ! command -v tmux &>/dev/null; then
-        echo "tmux is not installed. Please install it first."
-        exit 1
-    fi
+# Backend detection.  When running inside a Herdr-managed pane we drive
+# workspaces via the `herdr` CLI instead of tmux sessions.
+# Set TS_BACKEND=tmux in the config/env to force the classic tmux path.
+BACKEND="tmux"
+if [[ "$TS_BACKEND" == "tmux" ]]; then
+    BACKEND="tmux"
+elif [[ "$TS_BACKEND" == "herdr" ]] || { [[ "${HERDR_ENV:-}" == "1" ]] && command -v herdr &>/dev/null; }; then
+    BACKEND="herdr"
+fi
 
+sanity_check() {
     if ! command -v fzf &>/dev/null; then
         echo "fzf is not installed. Please install it first."
         exit 1
     fi
+
+    if [[ "$BACKEND" == "herdr" ]]; then
+        if ! command -v herdr &>/dev/null; then
+            echo "herdr is not installed. Please install it first."
+            exit 1
+        fi
+        if ! command -v jq &>/dev/null; then
+            echo "jq is not installed. Please install it first (required for the herdr backend)."
+            exit 1
+        fi
+        return
+    fi
+
+    if ! command -v tmux &>/dev/null; then
+        echo "tmux is not installed. Please install it first."
+        exit 1
+    fi
+}
+
+# --- Herdr backend helpers -------------------------------------------------
+# Herdr organizes terminals into workspaces (analogous to tmux sessions).
+# We map a selected directory to a workspace keyed by its label.
+
+# Emit "[HERDR] <label>\t<workspace_id>" lines for existing workspaces so the
+# picker can offer them alongside directories.
+herdr_list_workspaces() {
+    herdr workspace list 2>/dev/null |
+        jq -r '.result.workspaces[]? | "[HERDR] \(.label)\t\(.workspace_id)"'
+}
+
+# Find an existing workspace id by label.  Empty output means none exists.
+herdr_workspace_id_for_label() {
+    local label="$1"
+    herdr workspace list 2>/dev/null |
+        jq -r --arg l "$label" '.result.workspaces[]? | select(.label == $l) | .workspace_id' |
+        head -n1
+}
+
+herdr_focus() {
+    local workspace_id="$1"
+    log "focusing herdr workspace $workspace_id"
+    herdr workspace focus "$workspace_id" >/dev/null 2>&1
+}
+
+# Create-or-focus a workspace for the given directory.
+herdr_open() {
+    local dir="$1"
+    local label
+    label=$(basename "$dir" | tr . _)
+
+    local existing
+    existing=$(herdr_workspace_id_for_label "$label")
+
+    if [[ -n "$existing" ]]; then
+        herdr_focus "$existing"
+        return
+    fi
+
+    log "creating herdr workspace label=$label cwd=$dir"
+    local new_id
+    new_id=$(herdr workspace create --cwd "$dir" --label "$label" --focus 2>/dev/null |
+        jq -r '.result.workspace.workspace_id // empty')
+
+    if [[ -z "$new_id" ]]; then
+        echo "Error: failed to create herdr workspace for $dir"
+        exit 1
+    fi
+    log "created herdr workspace $new_id"
 }
 
 switch_to() {
@@ -222,8 +295,11 @@ fi
 
 # utility function to find directories
 find_dirs() {
+    if [[ "$BACKEND" == "herdr" ]]; then
+        # list existing herdr workspaces first
+        herdr_list_workspaces
     # list TMUX sessions
-    if [[ -n "${TMUX}" ]]; then
+    elif [[ -n "${TMUX}" ]]; then
         current_session=$(tmux display-message -p '#S')
         tmux list-sessions -F "[TMUX] #{session_name}" 2>/dev/null | grep -vFx "[TMUX] $current_session"
     else
@@ -247,6 +323,10 @@ find_dirs() {
 }
 
 handle_session_cmd() {
+    if [[ "$BACKEND" == "herdr" ]]; then
+        echo "Error: session commands (-s/--session) are not supported on the herdr backend yet."
+        exit 1
+    fi
     log "executing session command $session_cmd with index $session_idx split_type=$split_type"
     if ! is_tmux_running; then
         echo "Error: tmux is not running.  Please start tmux first before using session commands."
@@ -318,10 +398,26 @@ if [[ ! -z $session_cmd ]]; then
 elif [[ ! -z $user_selected ]]; then
     selected="$user_selected"
 else
-    selected=$(find_dirs | fzf)
+    # Show only the label column for herdr rows while keeping the hidden
+    # workspace id (tab-delimited second field) available after selection.
+    selected=$(find_dirs | fzf --delimiter='\t' --with-nth=1)
 fi
 
 if [[ -z $selected ]]; then
+    exit 0
+fi
+
+# --- Herdr backend selection handling --------------------------------------
+if [[ "$BACKEND" == "herdr" ]]; then
+    if [[ "$selected" =~ ^\[HERDR\]\ (.+)$ ]]; then
+        # Existing workspace picked: strip prefix and pull the hidden id.
+        rest="${BASH_REMATCH[1]}"
+        workspace_id="${rest#*$'\t'}"
+        herdr_focus "$workspace_id"
+    else
+        # A directory path was picked: create-or-focus a workspace for it.
+        herdr_open "$selected"
+    fi
     exit 0
 fi
 

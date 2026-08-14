@@ -4,6 +4,29 @@ its a script that does everything awesome at all times
 ## Requirements
 fzf and tmux
 
+For the herdr backend: `herdr` and `jq` (fzf still required).
+
+## Herdr support
+`tmux-sessionizer` also drives [herdr](https://github.com/) workspaces. When the
+script runs inside a herdr-managed pane (`HERDR_ENV=1`) and `herdr` is on
+`PATH`, it automatically uses the herdr backend instead of tmux:
+
+- The picker lists existing herdr workspaces (shown as `[HERDR] <label>`)
+  alongside your search-path directories.
+- Selecting a directory creates a workspace with `--cwd <dir>` and
+  `--label <basename>` (dots become underscores), or focuses the existing
+  workspace with that label if one already exists.
+- Selecting an existing `[HERDR]` row focuses that workspace directly.
+
+Backend selection can be forced via config/env:
+```bash
+TS_BACKEND=herdr   # always use herdr
+TS_BACKEND=tmux    # always use tmux (even inside herdr)
+```
+
+Not yet supported on the herdr backend: session commands (`-s/--session`),
+`--vsplit`/`--hsplit`, and `.tmux-sessionizer` hydrate hooks.
+
 ## Usage
 ```bash
 tmux-sessionizer [<partial name of session>]
